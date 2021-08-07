@@ -1,0 +1,330 @@
+---
+title: "Many-to-Many Point Computation Script"
+author: "Luka Vukovic"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+### Loading libraries
+
+```{r include=TRUE, message=FALSE, warning=FALSE}
+
+# Main
+library(r5r)
+library(sf)
+library(data.table)
+
+if (Sys.getenv("JAVA_HOME")!="") { Sys.setenv(JAVA_HOME="") }
+library(rJava)
+
+# Convenience
+library(tidyverse)
+library(glue)
+library(rlist)
+library(lubridate)
+
+
+# For pretty knitting
+library(lemon)
+knit_print.data.frame <- lemon_print
+knit_print.tbl <- lemon_print
+knit_print.summary <- lemon_print
+
+path_data <- "../../data/2_clean/"
+
+```
+
+
+### 1. Setting Up the Network Graph
+
+- To compute transit accessibility measures we must first build the
+transit network in R using the r5r library.
+- If the vancouver_canada.osm.pbf file needs to be converted to an .osm, one can use a binary osm converter available at: https://wiki.openstreetmap.org/wiki/Osmconvert#Binaries
+
+*Note: Graph network building may take up to a few minutes, especially for large cities*
+
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+
+# allocate an appropriate RAM to Java
+options(java.parameters = "-Xmx6g")
+
+# build transport network, pointing to path where OSM and GTFS data are located
+r5r_core <- setup_r5(data_path ='../../data/1_raw/transit_and_osm_data/', verbose = FALSE)
+
+```
+
+
+### 2. Loading the Origins and Destinations
+
+- Origins correspond to the centroid coordinates of Canadian Census 2016
+dissemination blocks across Canada. This was filtered by metropolitan area (MA)
+to keep only Greater Vancouver city blocks.
+- Destinations correspond to the amenity coordinates of the OCDAF database.
+
+```{r include=TRUE, message=FALSE, warning=FALSE}
+
+## ORIGINS
+
+# dissemination blocks via fread, a faster way to import than read_csv
+origins <- fread(file.path(paste0(path_data, "vancouver_db.csv")))
+
+# remove population column
+origins <- origins[, -2]
+
+# conver id numeric to char
+origins$id <- as.character(origins$id)
+
+paste('Origins: ', nrow(origins))
+head(origins)
+```
+
+```{r include=TRUE, message=FALSE, warning=FALSE}
+
+## DESTINATIONS
+
+# cultural/Art facilities
+destinations <- fread(file.path(paste0(path_data, "vancouver_facilities.csv")))
+
+# see summary counts of each amenity
+destinations %>% group_by(type) %>% summarise(count = n()) %>% arrange(desc(count))
+
+# filter amenity types to keep the amenities of interest
+target_amenities <- c('gallery',
+                      'museum',
+                      'library or archives',
+                      'theatre/performance and concert hall')
+
+destinations <- destinations %>% filter(type %in% target_amenities)
+
+# keep id, lat, and lon columns
+amenity_types <- destinations[, c(1,4)]
+destinations <- destinations[, 1:3]
+
+destinations$lat <-  as.numeric(destinations$lat) # char to numeric
+destinations$lon <-  as.numeric(destinations$lon) # char to numeric
+destinations$id <- as.character(destinations$id)  # numeric to char
+
+paste('Destinations with NA: ', nrow(destinations))
+destinations <- destinations[complete.cases(destinations)] # remove NA rows
+paste('Destinations clean: ', nrow(destinations))
+
+# peek
+head(destinations)
+
+```
+
+
+### 3. Setting Travel Constraints
+
+- For each computed travel time via transit, we set constraints to model more 
+realistic uses of transit networks.
+- For example, most people wont take the bus if it take longer than 2 hours,
+or if they need to walk more than a kilometer on the trip, or if they need to 
+take more than 3 transfers and so on.
+
+```{r include=TRUE, message=FALSE, warning=FALSE}
+
+# Non-transit modes: WALK, BICYCLE, CAR, BICYCLE_RENT, CAR_PARK
+# Transit modes: TRAM, SUBWAY, RAIL, BUS, FERRY, CABLE_CAR, GONDOLA, FUNICULAR
+# default walk speed = 3.6 km/h
+
+mode <- c('WALK', 'TRANSIT')
+max_walk_dist <- 1000 # 1 km
+max_trip_duration <- 120 # 2 hours
+max_rides <- 3 # max transfers
+
+```
+
+
+### 4. Computing the Travel Time Matrix
+
+- To measure a city blocks accessibility to all amenities within the
+constraints,we need to consider averaging travel times across both a weekly
+bus schedule, a saturday bus schedule, and a sunday bus schedule.
+- Furthermore, we also want to average transit times across the time of day
+so we compute a travel time every hour from 7am to 7pm with a departure window
+of 30 minutes.
+
+*Note: this operation only functions on a single cpu core so the*
+*cell can take a few hours to execute. Please be patient or consider using*
+*less origins or destinations or time points.*
+
+```{r message=FALSE, warning=FALSE, include=TRUE, eval = FALSE}
+
+## MAIN CELL FOR TTM COMPUTATION using CONVEYALS R5
+
+# use a sample to test before running full computation
+#sample <- origins[sample(nrow(origins), 5), ] 
+
+# collect each TTM
+all_ttms <- list()
+
+
+# for loop that computes a TTM for each departure date and hour
+# this is the code that takes roughly 1 hour to run for  15,197*353*36 events
+
+for (day in 14:16) {          # May 14=Fri, 15=Sat, 16=Sun
+  for (time in 7:19) {        # 7 to 19 hours
+    
+    departure_datetime <- as.POSIXct(glue("{day}-05-2021 {time}:00:00"), format="%d-%m-%Y %H:%M:%S")
+    
+    ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = origins,
+                          destinations = destinations,
+                          departure_datetime = departure_datetime,
+                          time_window = 30,
+                          
+                          # constrains
+                          mode = mode,
+                          max_walk_dist = max_walk_dist,
+                          max_trip_duration = max_trip_duration,
+                          max_rides = max_rides,
+                          verbose = FALSE)
+    
+    # format time and date to weekday
+    time_formatted <- format(strptime(as.character(time), format="%H"), format = "%H:%M")
+    day_formatted <- weekdays(departure_datetime)
+    
+    ttm$hour <- rep(time_formatted, nrow(ttm))
+    ttm$day <- rep(day_formatted, nrow(ttm))
+    
+    ttm <- left_join(ttm, destinations_with_type, by = c('toId' = 'id'))
+    
+    # append to a list then use rbindlist
+    all_ttms <-  list.append(all_ttms, ttm)
+    
+    print(glue('Progress: {round(((day-14)*12 + time-6)/37*100, 1)}%'))
+  }
+}
+
+
+# Fast way to bind all data.frames
+TTM <- rbindlist(all_ttms)
+
+print('COMPLETED')
+
+nrow(TTM)
+
+```
+
+
+### 5. Aggregating Travel Time Matrix 
+
+- We are interested in the average transit time across all 36 departure times
+so we aggregate on the origin and destination (ie. on every unique trip).
+- For comparing transit accessibility between different days and time see the
+**ttm_time_unaggregated** folder.
+
+```{r message=FALSE, warning=FALSE, include=TRUE, eval=FALSE}
+
+# aggregate for kepler hour/day visualization
+
+for_kepler <- TTM %>%
+  group_by(fromId, type, hour, day) %>%
+  summarise(time_to_nearest1 = min(travel_time))
+
+
+# aggregate for individual trips across all days and time
+TTM_agg <- TTM %>%
+           group_by(fromId, toId) %>% 
+           summarise(
+             avg_time = mean(travel_time), # average time
+             sd_time = sd(travel_time)     # standard deviation of avg time
+           )
+
+```
+
+
+```{r message=FALSE, warning=FALSE, include=TRUE, eval = FALSE}
+
+# Export the unaggregated files for kepler
+write_csv(for_kepler, paste0(path, "all_days_ttm.csv.gz"))
+
+fri_ttm <- for_kepler %>% filter(day == 'Friday')
+sat_ttm <- for_kepler %>% filter(day == 'Saturday')
+sun_ttm <- for_kepler %>% filter(day == 'Sunday')
+
+path <- "../../data/3_computed/ttm_by_day/"
+
+write_csv(fri_ttm, paste0(path, "friday_ttm.csv.gz"))
+write_csv(sat_ttm, paste0(path, "saturday_ttm.csv.gz"))
+write_csv(sun_ttm, paste0(path, "sunday_ttm.csv.gz"))
+
+```
+
+
+
+```{r message=FALSE, warning=FALSE, include=TRUE}
+
+# for knitting we just skip the TTM computation and aggregation
+TTM_agg <- read.table(gzfile(paste0("../../data/3_computed/main_travel_time_matrix--time_aggregated.csv.gz"),
+                         "main_travel_time_matrix--time_aggregated.csv"), # file within zip
+                  header=T, quote="\"", sep=",") # format into a table
+
+paste('Note this is the cleaned version that was imported to skip the computation cell during knitting.')
+
+summary(TTM_agg)
+
+```
+
+
+### 6. Fixing Odd Values in sd_time
+
+**NA standard deviations**
+- Since some origins may only have only a single trip, their standard deviation
+will be undefined as you need at least 2 values for standard deviation.
+- We simply replace them with the median trip standard deviation.
+- This is not the worst assumption to make since the bus still probably
+comes on a regular schedule with a standard uncertainty to most stops.
+
+**Zero standard deviations**
+- We can also imagine many trips have no standard deviation as their travel
+time is always identical across multiple days or hours.
+- To avoid any issues with zero division or massive numerators from small
+division (in case we use a different scoring formula), we can replace these
+cases with 1 minute since 1 minute is the smallest realistic standard
+deviation in any travel time.
+
+```{r message=FALSE, warning=FALSE, include=TRUE}
+
+# replace NAs
+median_sd <- median(TTM_agg$sd_time, na.rm=TRUE)
+TTM_agg <- TTM_agg %>% replace_na(list('sd_time' = median_sd))
+
+# replace < 1 with 1 to avoid large or infinity computations later on
+TTM_agg$sd_time[(TTM_agg$sd_time < 1)] <-  1
+
+paste('Clean TTM Aggregation:')
+summary(TTM_agg)
+
+```
+
+
+### 7. Exporting the Travel Time Matrix for Further Work
+
+- This summarizes our primary method for the first step in efficient
+transit network analysis: **Obtaining Realistic Travel Time Data**
+
+```{r message=FALSE, warning=FALSE, include=TRUE, eval = FALSE}
+
+# for compressed output - otherwise file is too big to be pushed to github
+library('readr')
+
+# Export the travel time matrix with time windows (for nearest isochrone)
+
+write_csv(all_hours_ttms, "../../data/3_computed/main_travel_time_matrix_with_timeWindow.csv.gz")
+
+# Export the travel time matrix with aggregated avg and sd (for score)
+
+write_csv(TTM_agg, "../../data/3_computed/main_travel_time_matrix--time_aggregated.csv.gz")
+
+# you may use this function to perform imports on compressed files:
+# data_here <- read.table(
+#                 unz("path/to/data/3_computed/main_travel_time_matrix--time_aggregated.zip",
+#                     "main_travel_time_matrix--time_aggregated.csv"), # file within zip
+#                 header=T, quote="\"", sep=",") # format into a table
+
+```
+

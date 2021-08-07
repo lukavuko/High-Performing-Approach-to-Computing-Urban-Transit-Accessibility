@@ -1,0 +1,239 @@
+---
+title: "Amenity Weights"
+date: "08/06/2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+## 0) Useful Libraries
+
+```{r message=FALSE, warning=FALSE, include=TRUE}
+
+# wrangling/convenience
+library(tidyverse)
+library(stringr)
+library(imputeTS)
+library(corrplot)
+library(tidyr)
+library(hablar)
+options(qwraps2_markup='markdown')
+
+# For pretty knitting
+library(lemon)
+knit_print.data.frame <- lemon_print
+knit_print.tbl <- lemon_print
+knit_print.summary <- lemon_print
+```
+
+## 1) Data Wrangling
+
+#### Import dataset
+```{R message=FALSE, warning=FALSE}
+### source file 
+
+source('weights_function.R')
+
+library_obj<-read.csv("../../data/1_raw/amenities/2018_bc_public_library_data.csv",fileEncoding="latin1")
+review_poi<-read_csv("../../data/2_clean/amenity_weights/amenity_google_data.csv")
+van_poi<-read_csv("../../data/2_clean/vancouver_facilities.csv")
+### import travel time matrix
+comppath <- "../../data/3_computed/"
+ttm <- read.table(gzfile(paste0(comppath, "main_travel_time_matrix--time_aggregated.csv.gz"),
+                         "main_travel_time_matrix--time_aggregated.csv"), # file within zip
+                  header=T, quote="\"", sep=",") # format into a table
+
+
+```
+
+#### Merge data review_poi and van_poi
+
+
+```{R}
+#Merge review dataset with vancouver point of interest
+left_join(review_poi,van_poi,by=c("poi_name"="name"))%>%distinct()->merged_data
+```
+
+**Convert the data to numeric **
+```{R message=FALSE, warning=FALSE}
+merged_data%>%convert(num(Rating, Total_Review,open_days,Total_hours))->merged_data
+
+```
+
+**Number of amenity in each type of arts facility **
+```{R}
+merged_data%>%group_by(type)%>%count()
+```
+Our primary interest would be gallery(n=99),library(n=86),museum(n=92) and theatre(n=75)
+
+
+### Wrangling objective library weight data
+
+
+**data cleaning**
+
+```{R,options(digits = 2)}
+van_list = c('Richmond','Vancouver','Burnaby','Township of Langley','North Vancouver','New Westminster','Maple Ridge','Port Moody','Surrey','Langley',
+            'Coquitlam','Delta','Fort Langley','White Rock','Pitt Meadows','Port Coquitlam', 'West Vancouver')
+
+# select those only in big vancouver area
+library_obj%>%filter(CITY %in%van_list)->library_obj
+
+# select column and rename them
+colnames(library_obj)
+library_obj%>%select('BRANCH_UNIQUE_ID', 'POSTAL_CODE', 'LATITUDE', 'LONGITUDE', 'MTLS_OUTLET', 'VISITS_B', 'FLOORSPACE.', 'HRS_OPEN.', 'DAYS_OPEN.')->lib_df
+
+colnames(lib_df)<-c('Branch_Id', 'Postal_Code', 'lat', 'lon', 'Total_Volumes', 'Annual_Visitors', 'Total_Space', 'Hrs_per_Year', 'Days_per_Year')
+
+# check nas
+colMeans(is.na(lib_df))
+
+```
+  
+  
+
+```{R}
+
+#### select relevent variable 
+merged_data%>%select(poi_name,Name,type,open_days,Total_hours,Rating,Total_Review,lat,lon)->df
+colnames(df) <- c("POI Name", "Google Place Name","Type","Open Days","Open Hours","Rating","Total Review","lat","lon")
+df%>%filter(Type=="library or archives")%>%as.data.frame()->df_lib
+
+# left join 
+
+#round to 2 decimal
+
+df_lib%>% convert(num(lat,lon))->df_lib
+df_lib$lat<-round(df_lib$lat,2)
+df_lib$lon<-round(df_lib$lon,2)
+lib_df$lat<-round(lib_df$lat,2)
+lib_df$lon<-round(lib_df$lon,2)
+df_lib<-na_mean(df_lib)
+merged_lib<-left_join(df_lib,lib_df,by = c("lat", "lon"))
+
+colnames(merged_lib)
+merged_lib%>%select("POI Name","Open Days","Open Hours", "Rating","Total Review","Total_Volumes","Annual_Visitors","Total_Space" )->merged_lib
+merged_lib%>% convert(num(Total_Volumes,Annual_Visitors,Total_Space))->merged_lib
+  
+```
+
+## 2) Weights computing
+
+
+**Compute the weights separately for library amenity**
+Since only library amenity has extra features from outside of google place data for example, "Total_Volumes","Annual_Visitors","Total_Space"  thus I decide to compute it separately 
+```{R message=FALSE, warning=FALSE,}  
+
+
+# exclude the Name variable 
+n_features<-merged_lib%>%rowwise()%>%apply(1,function(x) sum(is.na(x)==F))
+
+#normaliz with library
+normalize <- function(x) {
+return ((x - min(x,na.rm = T)) / (max(x,na.rm = T) - min(x,na.rm = T)))
+  }
+norm_lib<-merged_lib%>%mutate_if(is.numeric, normalize)
+norm_lib$n_features<-n_features-1
+norm_lib%>%rowwise() %>%mutate(Total_features=sum(`Open Days`,`Open Hours`,Rating,`Total Review`,Total_Volumes,Annual_Visitors,Total_Space,na.rm=TRUE),index=Total_features/n_features)->norm_lib
+norm_lib%>%select(`POI Name`,index)->lib_poi
+colnames(lib_poi)<-c("poi_name","Index" )
+head(lib_poi)
+```
+
+
+**Compute for generael amenity**
+ 
+
+```{r echo=TRUE, fig.show='hide'}
+#### Select the point of interest
+poi_int<-c("museum","gallery","theatre/performance and concert hall")
+df<-weights(merged_data,Amenity="museum")%>%as.data.frame()
+colnames(df)
+df<-df[F,]
+
+for(name in poi_int){
+  tem<-weights(merged_data,Amenity=name)
+  df<-rbind(invisible(tem),df)
+}
+
+
+```
+
+**Combine library with other amenities**
+
+```{R}
+
+rbind(df,lib_poi)->df_poi
+poi_index<-left_join(df_poi,van_poi,by=c("poi_name"="name"))
+```
+
+## 3) Weight IDs comparsion with ttm
+
+```{R}
+# clean weights
+amenity_wts <- poi_index[, c('id', 'Index')]
+names(amenity_wts) <- c('id', 'weight')
+amenity_wts$id <-  as.factor(amenity_wts$id)
+amenity_wts[!duplicated(amenity_wts$id), ]->amenity_wts
+#amenity_wts %>% group_by(id) %>% summarize(n = n()) %>% arrange(desc(n))
+
+# Check: are all the ttm amenity IDs in the weighted IDs set?
+check <- all(unique(ttm$toId) %in% unique(amenity_wts$id))
+# needs to be true for the join to work
+paste('Are all the ttm amenity IDs in the weighted IDs set? =', check)
+
+
+```
+
+### Fixed unequal number of ttm amenity IDs in the weighted IDs
+
+```{R}
+# convert Ids to  factor
+ttm$fromId <- as.factor(ttm$fromId)
+ttm$toId <- as.factor(ttm$toId)
+# ttm ids that appear in the weights ids
+ttm_id_in_wts <- unique(ttm$toId)[unique(ttm$toId) %in% unique(amenity_wts$id)]
+
+# subset these id that not in amenity wts
+ttm_id_not_in_wts <- unique(subset(ttm, !(toId %in% ttm_id_in_wts))$toId)
+ttm_id_not_in_wts <- as.data.frame(list("id_not_in_wts" = ttm_id_not_in_wts))
+
+paste('Number of id that not in amenity wts ', ttm_id_not_in_wts %>% nrow())
+
+
+# assign minimum weight on those places
+ttm_id_not_in_wts$weight <- min(amenity_wts$weight)
+colnames(ttm_id_not_in_wts)[1] <- "id"
+
+# add it to amenity weights
+amenity_wts <- rbind(amenity_wts, ttm_id_not_in_wts)
+
+amenity_wts<-amenity_wts[complete.cases(amenity_wts),]
+# Check: are all the ttm amenity IDs in the weighted IDs set?
+check <- all(unique(ttm$toId) %in% unique(amenity_wts$id))
+paste('Are all the ttm amenity IDs in the weighted IDs set? (needs to be true for the join to work) =', check)
+
+
+
+
+
+```
+
+
+
+## 4) Export csv 
+amenity_wts file contains id and wieghts 
+```{r echo=TRUE}
+#poi_index<-left_join(df,van_poi,by=c("poi_name"="name"))
+if (check == TRUE){
+  write.csv(amenity_wts,'../../data/2_clean/amenity_weights/amenity_weights.csv',row.names = FALSE)
+  print("exported")
+}
+
+if (check == F){
+  print("double check it ")
+}
+```
+
+
+
+

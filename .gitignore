@@ -1,0 +1,8 @@
+*.dat
+*.RData
+*.Rhistory
+*.p
+*.pbf
+*.osm
+*.mapdb
+*.gml

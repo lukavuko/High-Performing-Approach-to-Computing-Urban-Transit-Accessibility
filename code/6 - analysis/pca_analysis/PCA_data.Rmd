@@ -1,0 +1,196 @@
+---
+title: "PCA_data"
+author: "Yuxuan"
+date: "15/06/2021"
+output: html_document
+---
+
+### This is mainly for data wrangling
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+```
+
+
+## 0) Useful Libraries
+
+```{r message=FALSE, warning=FALSE, include=TRUE}
+
+
+# wrangling/convenience
+library(tidyverse)
+library(glue)
+library(stringr)
+library(sf)
+library(data.table)
+library(hablar)
+library(tibble)
+# visualization
+library(leaflet)
+library(mapview); mapviewOptions(platform = 'leafgl')
+#library(ggplot2)
+#library(RColorBrewer)
+#library(scales)
+#library(lattice)
+
+# For pretty knitting
+library(lemon)
+knit_print.data.frame <- lemon_print
+knit_print.tbl <- lemon_print
+knit_print.summary <- lemon_print
+
+
+# For PCA
+library(missMDA)
+library("factoextra")
+```
+## import data
+
+```{R}
+# import amenities (Cultural/Art facilities)
+scores_long<- fread(file.path('clean', '/scores_long.csv'))
+vancouver_Prox<- fread(file.path('clean', '/vancouver_Prox.csv'))
+destinations <- fread(file.path("clean", "vancouver_facilities_2.csv"))
+vancouver_db<-fread(file.path('clean', '/vancouver_db.csv'))
+```
+
+
+### Import the dissemination block shape file
+```{r}
+canada_shape <- st_read("census2016_DBS_shp/DB_Van_CMA/DB_Van_CMA.shp", stringsAsFactors = FALSE)
+# select a greater metropolitan area
+metropolitan_area <- "Vancouver"
+
+# filter columns and rows
+vancouver_shape <- data.frame(canada_shape[which(canada_shape$CMANAME == metropolitan_area), c(1,11,12,13, 28)])
+
+
+# id to factor
+vancouver_shape$DBUID <- as.factor(vancouver_shape$DBUID)
+vancouver_shape$CSDNAME <- as.factor(vancouver_shape$CSDNAME)
+paste('Rows = ', nrow(vancouver_shape))
+head(vancouver_shape)
+
+
+# 
+vancouver_db$id<-as.factor(vancouver_db$id)
+left_join(vancouver_db,vancouver_shape,by=c("id"="DBUID"))->df_van
+df_van$pop<-as.numeric(df_van$pop)
+df_van%>%group_by(CSDNAME)%>%summarise(pop_total=sum(pop,na.rm = T))->pop_csd
+
+```
+
+
+# number of amenity by area
+```{R}
+destinations$city_id<-as.factor(destinations$city_id)
+vancouver_shape$CSDUID<-as.factor(vancouver_shape$CSDUID)
+right_join(vancouver_shape,destinations,by=c("CSDUID"="city_id"))
+```
+
+
+### Join with vancouver_shape
+```{R}
+
+vancouver_shape%>%select(DBUID,CSDUID,CSDNAME,CSDTYPE)->CSDNAME
+CSDNAME%>%mutate(NAME=paste(CSDNAME,CSDTYPE))->CSDNAME
+scores_long$fromId<-as.factor(scores_long$fromId)
+CSDNAME$DBUID<-as.factor(CSDNAME$DBUID)
+
+score_csd<-left_join(scores_long, CSDNAME, by = c('fromId' = 'DBUID'))
+
+CSDNAME%>%group_by(NAME,CSDUID)%>%summarise(n=n())->df_n
+amn_csd<-left_join(df_n,destinations,by=c("CSDUID"="city_id"))
+amn_csd%>%group_by(NAME)%>%count()->amn_csd
+colnames(amn_csd)[2]<-"Amenity_num"
+paste(CSDNAME$CSDNAME,CSDNAME$CSDTYPE)%>%unique()
+```
+
+
+
+### Import rental price file with cenus subdivision id and data cleaning
+
+```{R}
+van_rental <- read_csv("van_rental.csv")
+van_rental%>%select(X1,`Average Rent ($)`,`Vacancy Rate (%)`)->van_rental
+colnames(van_rental)<-c("Name","Average_Rent","Vacancy_Rate")
+van_rental$Name<-gsub("[()]","",as.character(van_rental$Name))
+van_rental$Average_Rent<-gsub("[!*,]", "", van_rental$Average_Rent)
+van_rental$Vacancy_Rate<-gsub("[!*]", "", van_rental$Vacancy_Rate)
+van_rental%>%convert(num((Average_Rent)))%>%distinct()->van_rental
+
+unique(van_rental$Name)
+unique(score_csd$CSDNAME)
+```
+
+### compute average csd score by area
+```{R}
+score_csd%>%group_by(NAME,CSDUID)%>%summarise(csd_score=mean(score,na.rm=T))->score_csd_agg
+```
+
+
+### Compute population area
+```{R}
+# 
+vancouver_db$id<-as.factor(vancouver_db$id)
+right_join(vancouver_db,CSDNAME,by=c("id"="DBUID"))->df_van
+df_van$pop<-as.numeric(df_van$pop)
+df_van%>%group_by(NAME)%>%summarise(pop_total=sum(pop,na.rm = T))->pop_csd
+colnames(pop_csd)[1]<-"NAME"
+colnames(pop_csd)[2]<-"population"
+```
+
+
+### merge van_rental and score file
+
+```{R}
+left_join(score_csd_agg,van_rental,by = c('NAME' = 'Name'))->joined_df
+```
+
+## data cleaning
+```{R}
+# convert to numeric column
+columns <-colnames(vancouver_Prox)[-1]
+vancouver_Prox[, columns] <- lapply(columns, function(x) as.numeric(vancouver_Prox[[x]]))
+```
+
+
+```{r}
+vancouver_shape%>%select(DBUID,CSDUID,CSDNAME,CSDTYPE)->CSDNAME
+CSDNAME%>%mutate(NAME=paste(CSDNAME,CSDTYPE))->CSDNAME
+scores_long$fromId<-as.factor(scores_long$fromId)
+CSDNAME$DBUID<-as.factor(CSDNAME$DBUID)
+vancouver_Prox$id<-as.factor(vancouver_Prox$id)
+
+```
+
+```{r}
+# joined the data
+prox_df<-left_join(vancouver_Prox, CSDNAME, by = c('id' = 'DBUID'))
+```
+
+
+
+
+#### group by area, proxy data
+```{R}
+prox_df%>%group_by(NAME) %>%summarise_if(is.numeric, funs(mean(., na.rm = TRUE)))->df_proxy_area
+```
+
+### prepare for merging 
+```{R}
+joined_df$NAME<-as.factor(joined_df$NAME)
+df_proxy_area$NAME<-as.factor(df_proxy_area$NAME)
+amn_csd$NAME<-as.factor(amn_csd$NAME)
+pop_csd$NAME<-as.factor(pop_csd$NAME)
+left_join(joined_df,df_proxy_area, by = c('NAME'='NAME'))->df
+left_join(df,pop_csd, by = c('NAME'='NAME'))->df
+left_join(df,amn_csd, by = c('NAME'='NAME'))->df_mereged
+```
+
+
+```{R}
+## Export checkpoint
+write.csv(df_mereged, 'clean/pca_data.csv', row.names = FALSE)
+
+```
+

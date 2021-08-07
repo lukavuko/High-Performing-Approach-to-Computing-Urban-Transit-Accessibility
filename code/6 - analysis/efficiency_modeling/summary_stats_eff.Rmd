@@ -1,0 +1,231 @@
+# Vancouver General Analysis
+
+## Data Preparation
+
+```{r}
+
+library(data.table)
+library(tidyverse)
+library(readr)
+library(ggplot2)
+
+path_data <- "../../../data/"
+
+origins <- fread(file.path(paste0(path_data, "2_clean/vancouver_db.csv")))[,1:2]
+origins$id <- as.character(origins$id)
+
+
+TTM <- read.table(gzfile(paste0(path_data, "3_computed/main_travel_time_matrix--time_aggregated.csv.gz"),
+                         "main_travel_time_matrix--time_aggregated.csv"), header=T, quote="\"", sep=",")
+TTM$fromId <- as.character(TTM$fromId)
+
+# aggregate on from Id
+TTM2 <- TTM %>%
+          group_by(fromId) %>%
+          summarise(time_to_nearest_amenity = min(avg_time),
+                    avg_time_to_any_amenity = mean(avg_time))
+
+
+scores <- fread(file.path(paste0(path_data, "3_computed/transit_efficiency/efficiency_frame.csv")))
+scores$fromId <- as.character(scores$fromId)
+
+
+all_data <- left_join(origins, scores, by = c('id' = 'fromId'))
+all_data <- left_join(all_data, TTM2, by = c('id' = 'fromId'))
+all_data
+
+```
+
+```{r}
+## overall score distributions
+all_data %>%
+  ggplot(aes(x = efficiency)) +
+  geom_density(size = 1) +
+  labs(x = 'Transit Accessibility Score') +
+  egg::theme_article() +
+  theme(aspect.ratio = 0.6,
+        text = element_text(size=22),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) 
+ggsave('Overall Score Distribution.png', width = 8, height = 6)
+
+library(fmsb)
+all_data$efficiency[is.na(all_data$efficiency)] <- 0.001
+
+```
+
+
+
+
+
+```{r}
+
+# view how the data is balanced across neighborhoods
+city_frequency <- all_data %>%
+                    group_by(subdiv) %>%
+                    summarize(freq = n()) %>%
+                    arrange(desc(freq))
+
+#  title = 'Total Dissemination Blocks by City Subdivision'
+city_frequency %>%
+  ggplot(aes(x = freq, y = reorder(subdiv, +freq))) +
+  geom_bar(stat='identity') +
+  theme_classic() +
+  labs(x = 'Count', y = '') +
+  geom_text(aes(label=freq), size = 2,  vjust = 0.1, hjust=-0.25)
+
+ggsave('All City DB Count.png', width = 8, height = 8)
+
+# based on the bar graph we can remove cities below Port Coquitlam
+cities_to_keep <- city_frequency$subdiv[city_frequency$freq >= city_frequency$freq[city_frequency$subdiv == 'Port Coquitlam']]
+
+all_data_small <- all_data %>% filter(subdiv %in% cities_to_keep)
+
+# title = 'Total Dissemination Blocks in Largest City Subdivisions'
+all_data_small %>%
+  group_by(subdiv) %>%
+  summarize(freq = n()) %>%
+  arrange(desc(freq)) %>%
+  ggplot(aes(x = freq, y = reorder(subdiv, +freq))) +
+  geom_bar(stat='identity') +
+  theme_classic() +
+  labs(x = 'Count', y = '') +
+  geom_text(aes(label=freq), size = 2,  vjust = 0.1, hjust=-0.25)
+
+
+ggsave('Largest City DB Count.png', width = 8, height = 8)
+
+
+```
+```{r}
+GVA_data <- all_data
+GVA_data$subdiv <- GVA_data$subdiv <- "All Greater Vancouver Area"
+GVA_data$efficiency[is.na(GVA_data$efficiency)] <- 0.001
+GVA_rbind <- rbind(all_data_small,GVA_data)
+```
+
+## City Transit Accessibility Ditribution
+
+### Score Distribution
+```{r}
+
+### DONT USE THIS CELL
+
+#   labs(title = 'Transit Accessibility Score Distributions',
+#       subtitle = 'To reach the nearest cultural amenities across Vancouver Subdivisions') 
+
+all_data_small %>%
+  ggplot(aes(x = efficiency)) +
+  geom_density(aes(fill = subdiv), alpha = 0.4) +
+  guides(fill=guide_legend(title= 'Subdivision')) +
+  scale_x_continuous('Efficiency Score', breaks = c(-1.0,-0.5,0, 0.5, 1.0), limits = c(-1.0, 1.0)) +
+  scale_y_continuous(breaks = c(0, 16, 32)) +
+
+  theme_minimal() +
+  theme(aspect.ratio = 0.6,
+        panel.grid.major.x = element_line(colour="lightgray", size=0.05),
+        panel.grid.major.y = element_line(colour="lightgray", size=0.05),
+        panel.grid.minor.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  facet_wrap(vars(subdiv), nrow = 3)
+
+ggsave('Score Distributions.png', width = 8, height = 8)
+
+# labs(title = 'Transit Accessibility Score Distributions',
+#       subtitle = 'To reach the nearest cultural amenities across Vancouver Subdivisions') +
+
+all_data_small %>%
+  ggplot(aes(x = efficiency)) +
+  geom_density(aes(fill = subdiv), alpha = 0.2) +
+  guides(fill=guide_legend(title= 'Subdivision')) +
+  scale_x_continuous('Efficiency Score', breaks = c(-1.0,-0.5,0, 0.5, 1.0), limits = c(-1.0, 1.0)) +
+  scale_y_continuous(breaks = c(0, 12, 24)) +
+  
+  theme_minimal() +
+  theme(aspect.ratio = 0.6,
+        panel.grid.major.x = element_line(colour="lightgray", size=0.05),
+        panel.grid.major.y = element_line(colour="lightgray", size=0.05),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) 
+
+ggsave('Overlaid Score Distributions.png', width = 8, height = 8)
+
+```
+
+```{r}
+#   labs(title = 'Transit Accessibility Score Distributions',
+#       subtitle = 'To reach the nearest cultural amenities across Vancouver Subdivisions') 
+
+#legend_ord <- levels(with(all_data_small, reorder(factor(subdiv), -efficiency, na.rm = TRUE)))
+legend_ord <- levels(with(GVA_rbind, reorder(factor(subdiv), -efficiency, median, na.rm = TRUE)))
+
+GVA_rbind %>% 
+  ggplot(aes(y =reorder(factor(subdiv), efficiency, median, na.rm = TRUE),
+             x = (efficiency))) +
+  geom_violin(aes(fill = subdiv), scale = 'width', alpha = 0.4, draw_quantiles = c(0.5), size = 0.5) + 
+  scale_fill_discrete(breaks=legend_ord) +
+  scale_x_continuous("Efficiency Score",
+                     limits = c(-1.0, 1.0), breaks=  c(-1.0,-0.5,0, 0.5, 1.0)) +
+
+  guides(fill=guide_legend(title= 'Subdivision')) +
+
+  theme_minimal() +
+  theme(aspect.ratio = 1,
+        panel.grid.major.x = element_line(colour="lightgray", size=0.05),
+        panel.grid.major.y = element_line(colour="lightgray", size=0.05),
+        panel.grid.minor.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  geom_vline(xintercept = 0, colour = "Red", size  = 1)
+  
+ggsave('Violin Score Distributions.png', width = 8, height = 8)
+
+
+
+```
+
+
+```{r}
+GVA_rbind %>% filter(subdiv == "All Greater Vancouver Area") %>%
+  ggplot(aes(x = efficiency)) +
+  geom_density(aes(fill = subdiv), alpha = 0.2) +
+  guides(fill=guide_legend(title= 'Subdivision')) +
+  scale_x_continuous('Efficiency Score', breaks = c(-1.0,-0.5,0, 0.5, 1.0), limits = c(-1.0, 1.0)) +
+  scale_y_continuous(breaks = c(0, 12, 24)) +
+  
+  theme_minimal() +
+  theme(aspect.ratio = 0.6,
+        panel.grid.major.x = element_line(colour="lightgray", size=0.05),
+        panel.grid.major.y = element_line(colour="lightgray", size=0.05),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) 
+
+ggsave('Overlaid Score Distributions.png', width = 8, height = 8)
+```
+
+
+
+
+```{r}
+summary_stats <- all_data_small %>%
+  group_by(subdiv) %>%
+  summarize(mean_score_nearest_amenity = mean(efficiency, na.rm = T),
+            sd_score_nearest_amenity = sd(efficiency, na.rm = T),
+            mean_time_nearest_amenity = mean(time_to_nearest_amenity, na.rm = T),
+            sd_time_nearest_amenity = sd(time_to_nearest_amenity, na.rm = T),
+            mean_time_all_amenity = mean(avg_time_to_any_amenity, na.rm = T),
+            sd_time_all_amenity = sd(avg_time_to_any_amenity, na.rm = T))
+
+write.csv(summary_stats, '../../../data/3_computed/transit_efficiency/summary_statistics_by_city_eff.csv')
+```
+
+
+

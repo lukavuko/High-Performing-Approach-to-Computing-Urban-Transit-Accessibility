@@ -1,0 +1,258 @@
+---
+title: "Convertins Measures to Maps"
+author: "Luka Vukovic"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Notebook Purpose
+
+This notebook serves to summarize the entire visualization process going from 
+the travel time matrix to the visualizations. That involves the following 
+sections:
+
+1) Importing and Linking Geospatial Data
+2) Interactive Visualization
+3) Map HTML Exports
+
+## 0) Useful Libraries
+
+```{r message=FALSE, warning=FALSE, include=TRUE}
+# import custom scoring, cleaning, and visualization functions
+source('../0 - custom_functions/functions.R')
+
+# wrangling/convenience
+library(tidyverse)
+library(glue)
+library(stringr)
+library(sf)
+library(data.table)
+library(bit64)
+
+# visualization
+library(leaflet)
+library(mapview); mapviewOptions(platform = 'leafgl')
+
+# For pretty knitting
+library(lemon)
+knit_print.data.frame <- lemon_print
+knit_print.tbl <- lemon_print
+knit_print.summary <- lemon_print
+
+shapepath <- "../../data/1_raw/shape_files/"
+comppath <- "../../data/3_computed/"
+mappath <- "../../data/html_maps/"    # output directory
+
+```
+
+
+
+
+
+## 1) Importing Data
+
+### Import the Accessibility Measures
+```{r}
+scores_frame <- read.csv(paste0(comppath, 'accessibility_measures/scores_frame.csv'))
+isochr_frame <- read.csv(paste0(comppath, 'accessibility_measures/isochrone_frame.csv'))
+
+# convert factor columns to factor
+scores_frame[, c(1,2,4,5)] <- lapply(scores_frame[, c(1,2,4,5)], as.factor)
+isochr_frame[, c(1,2,3)] <- lapply(isochr_frame[, c(1,2,3)], as.factor)
+
+head(scores_frame)
+head(isochr_frame)
+
+```
+
+### Import the dissemination block shape file
+
+*Note: The shape file being imported was preproccessed from a national*
+*census shape file and does not need to be filtered/cleaned any further.*
+*GitBash scripting (via jq library) was used to extract 36 megabytes of*
+*Vancouver polygon data from 1.6 gigabytes of Canada wide geoJson polygon data,*
+*which R nor Python could efficiently handle*.
+
+```{r message=FALSE, warning=FALSE}
+
+vancouver_shape <- st_read(paste0(shapepath, 'DB_Van_CMA.shp'), stringsAsFactors = FALSE)
+
+# id to factor
+vancouver_shape$DBUID <- as.factor(vancouver_shape$DBUID)
+head(vancouver_shape)
+
+```
+
+
+### Import bus stop network data
+```{R}
+# Read Vancouver Station txt file
+rawlocs <- read.csv("../../data/1_raw/transit_and_osm_data/stops.txt",
+                    head = TRUE, sep=",")
+
+station_locs <- rawlocs[c("stop_id","stop_name","stop_lat","stop_lon")]
+
+colnames(station_locs)[3] <- "latitude"
+colnames(station_locs)[4] <- "longitude"
+
+# Convert the columns imported as a factor to characters
+station_locs$stop_id <- as.character(station_locs$stop_id)
+station_locs$stop_name <- as.character(station_locs$stop_name)
+
+# check for NA rows
+station_locs[is.na(as.numeric(station_locs$stop_id)), ]
+
+# check how many stops there are
+uniqueN(station_locs$stop_id)
+
+head(station_locs)
+
+```
+
+### Joining the GeoSpatial Data
+```{r}
+
+# merges shape and visualization data, then transforms them for visualizations
+# crs = target coordinate reference system
+mapping_data_prepper <- function(shape_data, visualization_data,
+                                 by = NULL, crs = 4326) {
+  if (is.null(by)) {
+    message("Must provide key or columns to join on. For example, on = c('ID' = 'id'))")
+    return()
+  }
+  
+  # join both datasets on the shapes so all polygons are included
+  shape_viz_frame <- left_join(shape_data, visualization_data, by = by)
+  
+  # convert to simple feature object (sf) then transform coords
+  return(st_transform(st_as_sf(shape_viz_frame), crs = crs))
+    
+}
+
+scores_viz_frame <- mapping_data_prepper(vancouver_shape, scores_frame,
+                                         by = c('DBUID' = 'fromId'))
+
+isochr_viz_frame <- mapping_data_prepper(vancouver_shape, isochr_frame,
+                                         by = c('DBUID' = 'fromId'))
+
+efficiency_frame <- read.csv('../../data/3_computed/transit_efficiency/efficiency_frame.csv')
+efficiency_frame$fromId <- as.factor(efficiency_frame$fromId)
+efficiency_frame_viz <- mapping_data_prepper(vancouver_shape, efficiency_frame,
+                                             by = c('DBUID' = 'fromId'))
+
+head(scores_viz_frame)
+```
+
+## 2) Interactive Visualization
+
+```{R}
+
+# this cell used to be for visualization experimentation
+# the functions have since been migrated to the visualization section of:
+# 0 - custom_functions
+
+
+```
+
+
+## 3) Map HTML Exports
+
+**Maps to export:**
+  1) Score maps (32)
+  2) Isochrone maps (4)
+  3) Kepler maps (4) - *performed elsewhere*
+  4) Efficiency maps (2)
+
+```{r message=FALSE, warning=FALSE, include=TRUE, eval = FALSE}
+
+source('../0 - custom_functions/functions.R')
+
+amenities <- unique(scores_viz_frame$type)
+weights <- unique(scores_viz_frame$weight)
+nearest_n <- unique(scores_viz_frame$nearest_n)
+bus_levels <- c(TRUE, FALSE)
+
+# Custom for loop for specific map outputting
+# Rendering dozens of maps can take a long time (10-20 minutes)
+
+# 32 score maps
+for (amenity in amenities) { 
+  for (add_stop in bus_levels) {
+    for (wt in weights) {
+      for (n in nearest_n) {
+        
+        map_maker_scores(data = scores_viz_frame,
+                         bus_data = station_locs,
+                         amenity = amenity,
+                         add_stop = add_stop,
+                         weight= wt,
+                         nearest_n = n,
+                         output_dir = paste0(mappath, '/score_maps'))
+      } 
+    }
+  }
+}
+
+# 8 isochrone maps
+for (amenity in amenities) { 
+  for (add_stop in bus_levels) {
+    
+    map_maker_isochrone(data = isochr_viz_frame,
+                        bus_data = station_locs,
+                        amenity = amenity,
+                        add_stop = add_stop,
+                        output_dir = paste0(mappath, '/isochrone_maps'))
+  }
+}
+  
+# 4 efficiency maps
+for (add_stop in bus_levels) { 
+  
+  map_maker_efficiency_cont(efficiency_frame_viz, 
+                            bus_data = station_locs,
+                            add_stop = add_stop,
+                            output_dir = paste0(mappath, '/efficiency_maps'))
+  
+  map_maker_efficiency_discrete(efficiency_frame_viz,
+                             bus_data = station_locs,
+                             add_stop = add_stop,
+                             output_dir = paste0(mappath, '/efficiency_maps'))
+}
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

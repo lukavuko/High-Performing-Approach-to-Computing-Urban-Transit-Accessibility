@@ -1,0 +1,412 @@
+---
+title: "Travel Time Matrix to Maps"
+output:
+  html_document:
+    df_print: paged
+authors: Luka Vukovic, Yuxuan Cui, Rain Shen
+---
+
+## Notebook Purpose
+
+This notebook serves to summarize the entire visualization process going from 
+the travel time matrix to the visualizations. That involves the following 
+sections:
+
+1) Setting Up the Travel Time Matrix
+2) Computing a Transit Accessibility Score
+3) Computing Isochrones as Interprettable Scores
+4) Wrangling Part II (NA Insertion)
+5) Exporting the Data
+
+## 0) Useful Libraries
+
+```{r message=FALSE, warning=FALSE, include=TRUE}
+# import custom scoring, cleaning, and visualization functions
+source('../0 - custom_functions/functions.R')
+
+# wrangling/convenience
+library(tidyverse)
+library(glue)
+library(stringr)
+library(sf)
+library(data.table)
+library(bit64)
+
+# visualization
+library(leaflet)
+library(mapview); mapviewOptions(platform = 'leafgl')
+
+# For pretty knitting
+library(lemon)
+knit_print.data.frame <- lemon_print
+knit_print.tbl <- lemon_print
+knit_print.summary <- lemon_print
+
+cleanpath <- "../../data/2_clean"
+comppath <- "../../data/3_computed/"
+
+```
+
+
+## 1) Setting Up the Travel Time Matrix
+
+
+### Import the travel time matrix
+```{r kable.opts=list(caption='Summary Table')}
+
+# import travel time matrix
+ttm <- read.table(gzfile(paste0(comppath, "main_travel_time_matrix--time_aggregated.csv.gz"),
+                         "main_travel_time_matrix--time_aggregated.csv"), # file within zip
+                  header=T, quote="\"", sep=",") # format into a table
+
+# convert Ids to  factor
+ttm$fromId <- as.factor(ttm$fromId)
+ttm$toId <- as.factor(ttm$toId)
+
+## Replace travel times less than 1 minute to 1 minute
+# This is done to prevent infinity values in the scoring since
+# 1 minute is still a reasonable time for trips in the 0 - 1 min range.
+ttm$avg_time <- pmax(ttm$avg_time, 1)
+
+# peek
+head(ttm)
+```
+
+### Import all dissemination block data
+```{r}
+# import dissemination blocks and keep id and pop columns
+origins <- fread(file.path(cleanpath, "vancouver_db.csv"))[, .(id, pop, lat, lon)]
+
+# replace commas in population column
+origins$pop <- str_replace_all(origins$pop, ',', '')
+
+# change col types
+origins$pop <- as.numeric(origins$pop)  
+origins$id <- as.factor(origins$id)  
+n_origins <- nrow(origins)
+
+
+paste('Origin Rows: ', n_origins)
+head(origins)
+```
+
+
+### Import all amenity data
+```{r}
+# import amenities (Cultural/Art facilities)
+destinations <- fread(file.path(cleanpath, "vancouver_facilities.csv"))
+
+# see summary counts of each amenity
+destinations %>% group_by(type) %>% summarise(count = n()) %>% arrange(desc(count))
+
+# filter types to keep only 4 most frequent amenities
+target_amenities <- c('gallery',
+                      'museum',
+                      'library or archives',
+                      'theatre/performance and concert hall')
+
+destinations <- destinations %>% filter(type %in% target_amenities)
+
+# keep only id and type columns
+destinations <- destinations[ , .(id, type)]
+
+# change column types
+destinations$type <- as.factor(destinations$type)
+destinations$id <- as.factor(destinations$id)  
+
+n_amenities <- nrow(destinations)
+paste('Destinations: ', n_amenities)
+head(destinations)
+```
+
+
+
+
+### Import amenity weights:
+```{r}
+# import amenity weights
+amenity_wts <- read.csv(paste0(cleanpath, '/amenity_weights/amenity_weights.csv'))
+
+# id to type factor
+amenity_wts$id <-  as.factor(amenity_wts$id)
+
+head(amenity_wts)
+
+# Check that all the travel time matrix amenity IDs are in the weighted IDs set
+# this NEEDS to be true for the join to work
+check <- all(unique(ttm$toId) %in% unique(amenity_wts$id))
+paste('Are all the ttm amenity IDs in the weighted IDs set? =', check)
+
+```
+
+
+### Fixed unequal number of ttm amenity IDs in the weighted IDs If check == False
+```{R}
+
+if (check == F) {
+  
+  # ttm ids that appear in the weights ids
+  ttm_id_in_wts <- unique(ttm$toId)[unique(ttm$toId) %in% unique(amenity_wts$id)]
+  
+  # subset ids not in amenity wts
+  ttm_id_not_in_wts <- unique(subset(ttm, !(toId %in% ttm_id_in_wts))$toId)
+  ttm_id_not_in_wts <- as.data.frame(list("id_not_in_wts" = ttm_id_not_in_wts))
+  
+  paste('Number of id that not in amenity wts ', ttm_id_not_in_wts %>% nrow())
+  
+  # assign minimum weight on those places
+  ttm_id_not_in_wts$weight <- min(amenity_wts$weight)
+  colnames(ttm_id_not_in_wts)[1] <- "id"
+  
+  # add it to amenity weights
+  amenity_wts <- rbind(amenity_wts, ttm_id_not_in_wts)
+  
+  # Check: are all the ttm amenity IDs in the weighted IDs set?
+  check <- all(unique(ttm$toId) %in% unique(amenity_wts$id))
+  paste('Are all the ttm amenity IDs in the weighted IDs set? (needs to be true for the join to work) =', check)
+}
+
+```
+
+
+### Join ttm, destination types, and amenity weights
+```{r message=FALSE, warning=FALSE}
+
+if (check == TRUE){
+  # join amenity weights to amenity types
+  destinations <- left_join(destinations, amenity_wts, by = c('id' = 'id'))
+  
+  # join to ttm
+  # use left join since we only care to keep existing amenities in the ttm
+  ttm <-  left_join(ttm, destinations, by = c('toId' = 'id'))
+}
+
+head(ttm)
+
+# descriptive info: how many origins actually have transit accessibility
+paste('Origins considered:', round((length(unique(ttm$fromId))/n_origins)*100, 2), '%')
+paste('Destinations considered:', round(length(unique(ttm$toId))/n_amenities*100, 2), '%')
+paste('Rows = ', nrow(ttm))
+
+```
+
+
+
+## 2) Computing a Transit Accessibility Score
+
+Notes: 
+
+- We don't scale the data before score computation because we care about the
+scale of time and standard deviation. We should use their values as is, 
+otherwise scaling will give them equal weighing again when this is a bad
+assumption.
+- Log normalizing the score isn't important as the score visualization depends 
+on the quantiles taken from the distribution of scores. Since log only shifts 
+values, the visualizations will be identical.
+
+```{r message=FALSE, warning=FALSE}
+
+score_list <- list()
+score_list_weighted<-list()
+i <- 1
+
+for (n in 1:4) {
+  
+  # we want nearest 1,2,3, and ALL
+  # so at n = 4 we reassign n as NULL
+  if (n == 4) { n <- NULL }
+  
+  # unweighted score
+  score <- sum_score_fxn(ttm, nearest_n = n, weight = FALSE, log_normalize_score = FALSE)
+  
+  # weighted score
+  score_weighted <- sum_score_fxn(ttm, nearest_n = n, weight = TRUE, log_normalize_score = FALSE)
+  
+  # append
+  score_list[[i]] <- score
+  score_list_weighted[[i]]<-score_weighted
+  i <- i+1
+  
+}
+
+# bind the score frames together and sort them by DBUID
+scores_long_unweighted <- rbindlist(score_list) %>% arrange(fromId, nearest_n)
+scores_long_weighted <- rbindlist(score_list_weighted) %>% arrange(fromId, nearest_n)
+
+# create a long data table with factors
+scores_long <- rbindlist(list(scores_long_weighted, scores_long_unweighted))
+
+```
+
+## 3) Computing Isochrones as Interprettable Scores
+
+```{r message=FALSE, warning=FALSE}
+
+# only keep the nearest amenity for isochrone categorization
+# this can also be changed to be an average of the nearest 2 or 3
+isochrone_frame <- ttm %>%
+  group_by(fromId, type) %>%
+  summarise(avg_time = min(avg_time))
+
+# isochrone frame
+isochrone_frame$time_groups <-  with(isochrone_frame,
+                                   ifelse(avg_time < 15, "15",
+                                   ifelse(avg_time < 30, "30",
+                                   ifelse(avg_time < 45, "45",
+                                   ifelse(avg_time < 60, "60",
+                                   ifelse(avg_time < 75, "75",
+                                   ifelse(avg_time < 90, "90", "90+")))))))
+
+isochrone_frame <- isochrone_frame[, c(1,2,4)]
+
+head(isochrone_frame)
+
+# see isochrone times density
+plot(density(as.numeric(isochrone_frame$time_groups), na.rm = TRUE, bw = 7))
+```
+
+
+
+## 4) Dataset Wrangling Part II (NA Insertion)
+
+**Filling IDs with NA:**
+
+Each origin (fromId) should have 32 different scores since there are:
+
+- 2 weight options * 4 amenity options * 4 nearest options = 32
+
+**Adding IDs that weren't included:**
+
+In addition to filling these missing values of the 32 expected values,
+there are also IDs that need to entirely be re-added since they may 
+not have any transit and so wouldn't be in the dataframe to begin with.
+
+### Accessibility Scores Frame
+
+```{r}
+source('../0 - custom_functions/functions.R')
+
+# values per ID = 4 * 4 * 2 = 32
+
+# initial check
+missing_scores <- check_rows(check_frame = scores_long,
+                             origins_frame = origins,
+                             rows_per_dissemination_block = 32,
+                             frame_type = 'ACCESSIBILITY SCORES FRAME')
+
+# fill
+all_scores_long <- NA_table_filler(scores_long,
+                                   custom_idx = missing_scores,
+                                   frame_type = 'score')
+
+# post fill check
+missing_scores <- check_rows(check_frame = all_scores_long,
+                             origins_frame = origins,
+                             rows_per_dissemination_block = 32,
+                             frame_type = 'POST FILL CHECK: SCORES FRAME')
+
+
+```
+### Isochrone Frame
+
+```{r}
+# values per ID = 4 
+
+# initial check
+missing_times <- check_rows(check_frame = isochrone_frame,
+                             origins_frame = origins,
+                             rows_per_dissemination_block = 4,
+                             frame_type = 'ISOCHRONE FRAME')
+
+# fill
+all_isochrone_frame <- NA_table_filler(isochrone_frame,
+                                   custom_idx = missing_times,
+                                   frame_type = 'isochrone')
+
+# post fill check
+missing_times <- check_rows(check_frame = all_isochrone_frame,
+                             origins_frame = origins,
+                             rows_per_dissemination_block = 4,
+                             frame_type = 'ISOCHRONE FRAME')
+```
+
+
+
+**Final step!**
+
+Now lets add population data to the data tables using a simply right join
+
+```{r}
+# right join with origins to include origins without transit access
+
+all_scores_long_pop <- left_join(all_scores_long,
+                                 origins[, c('id', 'pop')], # pop col only
+                                 by = c('fromId' = 'id'))
+
+all_isochrone_frame_pop <- left_join(all_isochrone_frame,
+                                     origins[, c('id', 'pop')], # pop col only
+                                     by = c('fromId' = 'id'))
+
+head(all_scores_long_pop)
+head(all_isochrone_frame_pop)
+
+# check to make sure all rows are there!!!
+expected_rows_score <- nrow(origins)*32
+expected_rows_isoch <- nrow(origins)*4
+
+paste('Scores Check: ', nrow(all_scores_long_pop) == expected_rows_score)
+paste('Isochrone Check: ', nrow(all_isochrone_frame_pop) == expected_rows_isoch)
+
+```
+
+## 5) Exporting the Accessibility Measures
+
+```{r}
+
+## Export checkpoint
+write.csv(all_scores_long_pop,
+          paste0(comppath, '/accessibility_measures/scores_frame.csv'),
+          row.names = FALSE)
+
+write.csv(all_isochrone_frame_pop,
+          paste0(comppath, '/accessibility_measures/isochrone_frame.csv'),
+          row.names = FALSE)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

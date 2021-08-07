@@ -1,0 +1,111 @@
+---
+title: "Clustering"
+author: "Rain Shen"
+date: "6/16/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load library
+
+```{r}
+
+library(tidyverse)
+library(glue)
+library(stringr)
+library(sf)
+library(caret)
+library(data.table)
+
+library(cluster)
+library(FactoMineR)
+library(factoextra)
+
+```
+
+```{r}
+data1 <- read.csv("pca_data.csv")
+
+# Select columns related to dissemination blocks, amenities, and transit
+data1 <- data1[, c(1,2,3,4,5,13,15,16,17)]
+
+# Data wrangling
+data1$NAME = substr(data1$NAME, 1, nchar(data1$NAME)-2)
+data1 <- setDT(data1)[, lapply(.SD, mean, na.rm=TRUE), by=NAME]
+
+# Convert NAME column to ROWNAME
+data1 <- data.frame(column_to_rownames(data1, var = "NAME"))
+
+# Remove all null values
+na.omit(data1) -> data1
+
+# Remove Great Vancouver
+data1 = data1[-4,]
+
+# View
+head(data1)
+```
+
+
+```{r}
+
+# Data preparation for clustering analysis
+df <- data1 %>% select(where(is.numeric))
+df <- df[-1]
+
+df <- scale(data1)
+head(df)
+```
+
+### K-means Clustering
+
+```{r}
+# Correlation-based distance method
+
+res.dist <- get_dist(df, method = "pearson")
+head(round(as.matrix(res.dist), 2))[, 1:8]
+```
+
+```{r}
+set.seed(123)
+
+# Compute the gap statistic
+gap_stat <- clusGap(df, FUN = kmeans, nstart = 25, 
+                    K.max = 12, B = 100) 
+# Plot the result
+fviz_gap_stat(gap_stat)
+```
+
+```{r}
+# Compute k-means using 4 clusters
+set.seed(123)
+km.res <- kmeans(df, 4, nstart = 25)
+head(km.res$cluster, 20)
+```
+```{r}
+# Plot the k-means clustering
+fviz_cluster(km.res, data1)
+```
+
+### Hierarchical Clustering
+
+```{r}
+# Visualize the dissimilarity matrix
+
+fviz_dist(res.dist, lab_size = 8)
+```
+
+```{r}
+# Compute dissimilarity matrix
+res.dist2 <- dist(df, method = "euclidean")
+
+# Compute hierarchical clustering
+res.hc <- hclust(res.dist2, method = "ward.D2")
+
+# Visualize
+plot(res.hc, cex = 0.5)
+```
+

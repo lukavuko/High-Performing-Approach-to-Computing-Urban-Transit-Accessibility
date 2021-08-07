@@ -1,0 +1,121 @@
+---
+title: "Amenity Density Computation"
+author: "Luka Vukovic"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+As we did before, we will run r5r to compute how many amenities there are within
+a 1km walking distance (ie. network manhattan distance) from each origin
+starting point. The number of amenities mapped will be summed to tell us
+how amenity dense a given area is from the point of a specific block.
+
+*Note: only cultural amenities are considered, but future work should*
+*expand to consider grocery stores, hospitals, employment and so forth as well.*
+
+
+### Loading libraries
+```{r include=TRUE, message=FALSE, warning=FALSE}
+
+# Main
+library(r5r)
+library(sf)
+library(data.table)
+
+if (Sys.getenv("JAVA_HOME")!="") { Sys.setenv(JAVA_HOME="") }
+library(rJava)
+
+# Convenience
+library(tidyverse)
+library(glue)
+library(rlist)
+
+```
+
+
+### 1. Setup the Network Graph
+
+- Requires GTFS and OSM data to be present in the same directory.
+
+```{r message=FALSE, warning=FALSE}
+
+## Allocate 4G RAM to Java
+options(java.parameters = "-Xmx6g")
+
+## Build transport network, pointing to path where OSM and GTFS data are located
+r5r_core <- setup_r5(data_path = '../../../data/1_raw/transit_and_osm_data/', verbose = FALSE)
+
+```
+
+
+### 2. Load origin/destination points
+
+```{r, warning=FALSE}
+
+origins <- fread(file.path("../../../data/2_clean/", "vancouver_db.csv"))
+destinations <- fread(file.path("../../../data/2_clean", "vancouver_facilities.csv"))
+
+
+# minor cleaning
+origins <- origins[, c(1,3,4)]
+colnames(origins)[1] <- 'id'
+origins$id <- as.character(origins$id)  # numeric to char
+
+# minor cleaning
+destinations <- destinations[, c(1:3)]
+destinations$lat <-  as.numeric(destinations$lat) # char to numeric
+destinations$lon <-  as.numeric(destinations$lon) # char to numeric
+destinations$id <- as.character(destinations$id)  # numeric to char
+destinations <- destinations[complete.cases(destinations)] # remove NA rows
+
+# Peek
+head(origins)
+head(destinations)
+
+```
+
+
+### 3. Compute All Amenities within 1km Walking Distance
+
+```{r}
+
+#departure_datetime <- as.POSIXct(glue("01-05-2021 00:00:00"), format="%d-%m-%Y %H:%M:%S")
+walk_ttm <- travel_time_matrix(r5r_core = r5r_core,
+                               origins = origins, destinations = destinations,
+                              #departure_datetime = departure_datetime,
+                              
+                              # constraints
+                              mode = c('WALK'),
+                              max_walk_dist = 1000,
+                              max_trip_duration = 120,
+                              verbose = FALSE)
+
+print('COMPLETED')
+summary(walk_ttm)
+
+```
+
+*Count amenities accessible to every dissemination block*
+
+```{r}
+
+
+walk_ttm_agg <- walk_ttm %>%
+                group_by(fromId) %>% 
+                summarise(n_amenities = n())
+
+summary(walk_ttm_agg)
+head(walk_ttm_agg)
+
+```
+
+### Export
+```{r}
+
+write.csv(walk_ttm_agg, "../../../data/3_computed/amenity_density.csv",
+          row.names = FALSE)
+
+```
+

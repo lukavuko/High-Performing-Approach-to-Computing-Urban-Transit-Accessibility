@@ -1,0 +1,87 @@
+---
+title: "transit"
+author: "Yuxuan"
+date: "20/06/2021"
+output: html_document
+---
+
+
+##### The purpose of this notebook is to get the # of bus stops & the bus frequency in each subdivison
+```{R}
+# vancouver db with lat and lon
+vancouver_db<-fread(file.path('../../../data/2_clean', '/vancouver_db.csv'))
+
+canada_shape <- st_read("../../../data/1_raw/shape_files/DB_Van_CMA.shp", stringsAsFactors = FALSE)
+# select a greater metropolitan area
+metropolitan_area <- "Vancouver"
+
+# filter columns and rows
+vancouver_shape <- data.frame(canada_shape[which(canada_shape$CMANAME == metropolitan_area), c(1,11,12,13,16,28)])
+
+vancouver_shape%>%mutate(NAME=paste(CSDNAME,CSDTYPE))->vancouver_shape
+
+head(vancouver_shape)
+
+
+
+```
+
+```{r}
+
+stops <- read.csv("../../../data/1_raw/transit_and_osm_data/stops.txt",head = TRUE, sep=",")
+
+stop_times<- read.csv("../../../data/1_raw/transit_and_osm_data/stop_times.txt",head = TRUE, sep=",")
+
+head(stops)
+head(stop_times)
+```
+
+```{r}
+# note the stop times contians the transit of 7 days Mon to Sun
+
+### 7 days per week thus divide 7 to get a proxy of bus trip per stop on one day
+stop_times%>%select(trip_id,stop_id)%>%group_by(stop_id)%>%summarise(bus_pass_perid=n()/7)->bus_trip
+
+
+max(bus_trip$bus_pass_perid)
+head(bus_trip)
+```
+
+```{r}
+### Join bus stops with van_db
+stops$lat<-round(stops$stop_lat,2)
+stops$lon<-round(stops$stop_lon,2)
+vancouver_db$lat<-round(vancouver_db$lat,2)
+vancouver_db$lon<-round(vancouver_db$lon,2)
+right_join(vancouver_db,stops,by=c("lat","lon"))->bus_df
+
+bus_df%>%select(stop_id,id,stop_name)%>%distinct(stop_id,.keep_all = T)->bus_df
+
+bus_trip$stop_id<-as.factor(bus_trip$stop_id)
+bus_df$stop_id<-as.factor(bus_df$stop_id)
+```
+
+```{R}
+# join the bus stops and bus density has bus id pop,stop id 
+left_join(bus_df,bus_trip,"stop_id")->bus_info
+
+# join bus info with id
+vancouver_shape$DBUID<-as.factor(vancouver_shape$DBUID)
+bus_info$id<-as.factor(bus_info$id)
+# 
+left_join(bus_info,vancouver_shape,by=c("id"="DBUID"))->bus_mg
+
+bus_mg%>%group_by(CSDNAME)%>%summarise(bus_n=n(),bus_densi=mean(bus_pass_perid,na.rm=T))->bus_stops
+
+colnames(bus_stops)[2:3]<-c("NUM_BUS","AVG_BUS_FREQ")
+
+head(bus_stops)
+
+
+## NUM BUS is the number of bus stops in each subdivisions
+
+## AVG_BUS_FREQ is the average of number of bus that pass per bus stops on a day in each subdivison
+
+
+write.csv(bus_stops,"../../../data/3_computed/bus_stops.csv")
+```
