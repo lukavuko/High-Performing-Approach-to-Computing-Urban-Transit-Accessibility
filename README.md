@@ -6,7 +6,9 @@ The primary ***project code***, ***project data***, and ***deployed dashboard co
 
 ![Vancouver](https://vancouver.ca/images/cov/feature/skytrain-landing.jpg)
 
-**Dashboard Link:**  [Vancouver Transit Accessibility to Cultural Amenities Dashboard](https://van-transit-access2.herokuapp.com/)
+[Deprecated] **Dashboard Link:**  [Vancouver Transit Accessibility to Cultural Amenities Dashboard](https://van-transit-access2.herokuapp.com/)
+
+Since the dashboard has been shut off, you can visit the [dashboard repo](README.md) for viewing screenshots and components of the app itself.
 
 **Introduction**
 
