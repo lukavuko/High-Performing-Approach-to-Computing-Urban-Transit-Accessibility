@@ -1,25 +1,27 @@
 ## A High Performing, Scalable Model for Computing and Visualizing Public Transit Accessibility
 
-The primary ***project code***, ***project data***, and ***deployed dashboard code*** can be found in the `code`, `data`, and `dashboard_deployed` directories, respectively. Other documentation and presentation related materials are described in the remaining directories. The executive summary is detailed below, noting that Metropolitan Vancouver and its cultural amenities were used as a proof of concept example on how our project code could be leveraged and applied.
+> This codebase was a prototyped capstone project which was sourced by Statistics Canada in the implementation of [Proximity Measures Data Viewer](https://www150.statcan.gc.ca/n1/pub/71-607-x/71-607-x2020011-eng.htm). Metropolitan Vancouver and its cultural amenities were used as a proof of concept example on how to measure urban transit accessibility in terms of time and efficiency.
+>
+> ~[Deprecated] **Dashboard Link:**  [Vancouver Transit Accessibility to Cultural Amenities Dashboard](https://van-transit-access2.herokuapp.com/)~
+>
+> Since the dashboard has been shut off, you can find pre-rendered html maps within the /dashboard/maps directoty or see the [dashboard repo](README.md) for the hosted version of the app itself.
+>
+> All html renderings of our accessibility scores measures were developed using the [R5-Routing algorithm](https://ipeagit.github.io/r5r/) to prototype computation of transit accessibility for data driven urban planning.
 
-### A Case Study on Cultural and Art Amenities in Metro Vancouver
+**The goal of this codebase was to develop methods for answering questions such as...**
 
-![Vancouver](https://vancouver.ca/images/cov/feature/skytrain-landing.jpg)
-
-[Deprecated] **Dashboard Link:**  [Vancouver Transit Accessibility to Cultural Amenities Dashboard](https://van-transit-access2.herokuapp.com/)
-
-Since the dashboard has been shut off, you can find pre-rendered html maps within the /dashboard/maps directoty or see the [dashboard repo](README.md) for the hosted version of the app itself.
-
-All html renderings of our accessibility scores measures were developed using the [R5-Routing algorithm](https://ipeagit.github.io/r5r/) to prototype computation of transit accessibility for data driven urban planning.
-
-#### **For example, how is accessibility judged by time (Isochrones)? ie. How much time is required to reach the nearest cultural amenity?**
+#### **...how is Vancouver's transit accessibility represented when judged by time (Isochrones)? ie. How much time is required to reach the nearest cultural amenity?**
 ![image](https://github.com/user-attachments/assets/ebbda2cc-00a8-4d29-81ac-e7049c980252)
 
 ![image](https://github.com/user-attachments/assets/2f27bbdc-358b-4b30-8146-38457ab17524)
 
-#### **How is accessibility judged by efficiency? ie. How well does accessibility matched an estimated demand?**
+#### **...how is Vancouver's transit accessibility when judged by efficiency? ie. How well does accessibility match an estimated demand?**
 ![image](https://github.com/user-attachments/assets/d2d3a19b-4860-4dc9-ae28-db2fd9ec12a9)
 
+
+## A Case Study on Cultural and Art Amenities in Metro Vancouver
+
+![Vancouver](https://vancouver.ca/images/cov/feature/skytrain-landing.jpg)
 
 ### **Introduction**
 
